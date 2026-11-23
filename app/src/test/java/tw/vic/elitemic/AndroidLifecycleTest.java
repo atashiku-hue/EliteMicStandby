@@ -26,6 +26,18 @@ public class AndroidLifecycleTest {
         prefs=Prefs.of(app);
         prefs.edit().clear().commit();
     }
+    @Test public void onlyRelevantStandbyActionIsVisible(){
+        try(var ctl=Robolectric.buildActivity(MainActivity.class).setup()){
+            var activity=ctl.get();
+            android.widget.Button enable=org.robolectric.util.ReflectionHelpers.getField(activity,"enable");
+            android.widget.Button stop=org.robolectric.util.ReflectionHelpers.getField(activity,"disable");
+            assertEquals(android.view.View.VISIBLE,enable.getVisibility());
+            assertEquals(android.view.View.GONE,stop.getVisibility());
+            prefs.edit().putBoolean("enabled",true).commit();
+            assertEquals(android.view.View.GONE,enable.getVisibility());
+            assertEquals(android.view.View.VISIBLE,stop.getVisibility());
+        }
+    }
     @Test public void launcherOpensWithoutRuntimePermissions(){
         try(var controller=Robolectric.buildActivity(MainActivity.class).setup()){
             assertNotNull(controller.get().getWindow().getDecorView());
@@ -47,7 +59,7 @@ public class AndroidLifecycleTest {
     }
     @Test public void enabledDisconnectedServiceWaitsAndStopActionPersists(){
         shadowOf(RuntimeEnvironment.getApplication()).grantPermissions(Prefs.REQUIRED);
-        prefs.edit().putBoolean("enabled",true).putString("address","12:34:56:78:9A:BC").commit();
+        prefs.edit().putBoolean(Prefs.KEEP_VOICE_READY,true).putBoolean("enabled",true).putString("address","12:34:56:78:9A:BC").commit();
         var ctl=Robolectric.buildService(StandbyService.class).create();
         try {
             assertEquals(Service.START_STICKY,ctl.get().onStartCommand(null,0,1));
@@ -59,7 +71,7 @@ public class AndroidLifecycleTest {
     }
     @Test public void connectedHeadsetRequestsRouteWithoutEnteringCallMode(){
         shadowOf(RuntimeEnvironment.getApplication()).grantPermissions(Prefs.REQUIRED);
-        prefs.edit().putBoolean("enabled",true).commit();
+        prefs.edit().putBoolean(Prefs.KEEP_VOICE_READY,true).putBoolean("enabled",true).commit();
         var ctl=Robolectric.buildService(StandbyService.class).create();
         var audio=ctl.get().getSystemService(android.media.AudioManager.class);
         var port=org.robolectric.shadows.AudioDeviceInfoBuilder.newBuilder()

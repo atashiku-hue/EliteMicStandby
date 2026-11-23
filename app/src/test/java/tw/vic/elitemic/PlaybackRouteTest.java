@@ -33,7 +33,7 @@ public class PlaybackRouteTest {
     @Test public void selectsLePortAndSeparatesPreferenceFromActualPlayback() {
         var app=RuntimeEnvironment.getApplication();
         shadowOf(app).grantPermissions(Prefs.REQUIRED);
-        Prefs.of(app).edit().clear().putBoolean("enabled",true).commit();
+        Prefs.of(app).edit().clear().putBoolean("enabled",true).putBoolean(Prefs.KEEP_VOICE_READY,true).commit();
         var ctl=Robolectric.buildService(StandbyService.class).create();
         try {
             var service=ctl.get();

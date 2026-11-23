@@ -1,23 +1,25 @@
 # EliteMicStandby · 耳機聽寫待命
 
-An Android utility for using a Bluetooth headset microphone with dictation apps. It keeps a headset voice route available while another app, such as Typeless, handles recording and transcription. Version 0.5.2 addresses a case where the voice channel drops while the headset still appears connected.
-
-**Tested combination:** ASUS ZenFone 11 Ultra, Android 16 (API 36), Jabra Elite 10, Typeless floating bubble. Dictation produced the expected text on first wear and again after removing and putting the earbuds back on. Compatibility with other devices or dictation apps needs separate testing. Android 12 (API 31) is the minimum install version. The Android 16 headset voice-session path and the older communication-routing fallback behave differently.
+EliteMicStandby prepares an Android Bluetooth headset microphone for dictation and releases the voice route when media or calls take priority. It runs on Android 12 or later. Download the [v0.5.12 debug APK and release notes](https://github.com/atashiku-hue/EliteMicStandby/releases/tag/v0.5.12).
 
 ## 使用方法
 
-1. 安裝測試版 APK，連接支援通話的藍牙耳機。打開「耳機聽寫待命」，允許附近裝置與電話狀態權限，確認畫面顯示待命。必要時點「啟用自動待命」。
-2. 到文字輸入框，用手點 Typeless 懸浮球進行聽寫。App 會在偵測到系統通話或有線／USB 麥克風時讓出路由。「停止待命」可結束前景服務。
-3. 若要確認摘戴後是否可用，第一次和戴回耳機後各說一句不同的短句，核對輸入框實際出現的文字。系統紀錄只能輔助判斷路由。
+1. 連接支援通話的耳機，開啟 App 並確認顯示「自動待命已開啟」。如要保留一般音樂與通透模式，維持預設設定。
+2. 傳統藍牙耳機連線時，App 會嘗試自動準備耳麥。通知顯示「藍牙輸入已列出」後，20 秒內點 Typeless 自己的懸浮球說話。每句結束後可在 12 秒內開始下一句。也可從通知點「準備本次聽寫」。
+3. 使用「查看系統收音紀錄」比對錄音輸入。通訊裝置顯示藍牙時，錄音仍可能使用手機麥克風。全機紀錄無法確認錄音屬於哪個 App。
 
-**English quick start:** Connect a headset with a call microphone, open EliteMicStandby, grant the nearby-device and phone-state permissions, and enable standby. Dictate from the other app's normal interface. Use Stop Standby to release the route. While standby is active, media quality and battery use can change.
+**Quick start.** Connect a headset, enable standby, then use your dictation app’s own controls when the headset input is ready. Media playback, calls and wired or USB microphones take priority. Leaving the voice route open can affect audio quality and battery life.
+
+## Device testing
+
+On v0.5.11, a ZenFone 11 Ultra running Android 16 with Jabra Elite 10 earbuds successfully entered text via Typeless after YouTube playback and after reopening the app. Android reported both headset and built-in microphone inputs during that period. The input for each transcript remains unverified. The v0.5.12 build passed 53 automated tests and Android lint. Device acceptance for this build is pending. You can report another combination using the [compatibility template](.github/ISSUE_TEMPLATE/compatibility.md).
 
 ## Permissions and diagnostics · 權限與診斷
 
 - The foreground service uses nearby-device access to identify the headset and phone-state access to yield during calls. On supported Android versions, allow notifications to see the standby status.
 - 日常待命不需要麥克風權限。「量目前輸入的音量（六秒）」才會詢問麥克風權限。先結束其他錄音，再依提示安靜兩秒、說話四秒。量測只留裝置與音量統計，不存音檔。
 - The system log reports visible recording routes and formats. It cannot attribute another app's audio samples or prove that a transcript is correct. The app has no Internet permission.
-- 選配的無障礙服務可以讀取互動視窗並接收按鍵事件，以手機音量下鍵點選可辨認的 Typeless 浮球。直接點浮球可略過這項權限。Jabra 耳機本體的單按沿用耳機自己的通話／靜音行為。Shizuku 和無線偵錯都不是使用條件。
+- 本工具使用原生音訊路由；操作 Typeless 時直接點其浮球。Jabra 耳機本體的單按沿用耳機自己的通話／靜音行為。Shizuku 和無線偵錯都不是使用條件。
 
 ## Build and verify · 自行編譯與驗證
 

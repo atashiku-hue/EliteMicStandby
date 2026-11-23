@@ -65,6 +65,31 @@ public class SystemAudioTraceTest {
         assertTrue(prefs.getString("systemAudioHistory","").split("\n")[0].contains("沒有可見錄音"));
         assertFalse(SystemAudioTrace.report(prefs).contains("example.private.app"));
     }
+    @Test public void preparationRecordsActualPhoneThenHeadsetWithoutClaimingAppIdentity() {
+        SystemAudioTrace trace = new SystemAudioTrace(audio,null,prefs);
+        var config=shadowOf(audio).createActiveRecordingConfiguration(37,MediaRecorder.AudioSource.MIC,"example.private.app");
+        trace.beginPreparation("按準備");
+        trace.confirmPreparation();
+        // The SDK 34 Robolectric builder maps external types through the output table.
+        Recording.input=port(AudioDeviceInfo.TYPE_BUILTIN_MIC);
+        Object devicePort=org.robolectric.util.ReflectionHelpers.getField(Recording.input,"mPort");
+        int internalMic=org.robolectric.util.ReflectionHelpers.getStaticField(
+                org.robolectric.util.ReflectionHelpers.loadClass(getClass().getClassLoader(),"android.media.AudioSystem"),
+                "DEVICE_IN_BUILTIN_MIC");
+        org.robolectric.util.ReflectionHelpers.setField(devicePort,"mType",internalMic);
+        assertEquals(AudioDeviceInfo.TYPE_BUILTIN_MIC,Recording.input.getType());
+        trace.recordingChanged(List.of(config));
+        trace.recordingChanged(List.of()); // A second phrase can start on a different input.
+        Recording.input=port(AudioDeviceInfo.TYPE_BLUETOOTH_SCO);
+        trace.recordingChanged(List.of(config));
+        trace.recordingChanged(List.of());
+        assertTrue(prefs.getAll().toString(),prefs.getString("prepFirst","").contains("手機內建麥克風"));
+        assertTrue(prefs.getString("prepLatest","").contains("傳統藍牙 SCO"));
+        trace.finishPreparation("測試結束");
+        assertTrue(prefs.getString("prepEnd","").contains("結束"));
+        assertTrue(prefs.getString("prepPhrases","").contains("第 2 段"));
+        assertFalse(SystemAudioTrace.report(prefs).contains("example.private.app"));
+    }
     @Test public void snapshotsDeduplicateAndStayBoundedWithoutLosingLastRecording() {
         SystemAudioTrace trace=new SystemAudioTrace(audio,null,prefs);
         Recording.input=port(AudioDeviceInfo.TYPE_USB_HEADSET);

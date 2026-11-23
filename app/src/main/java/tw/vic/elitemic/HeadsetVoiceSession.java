@@ -72,6 +72,24 @@ final class HeadsetVoiceSession implements BluetoothProfile.ServiceListener {
         return devices.size() == 1 ? devices.get(0) : null;
     }
 
+    boolean matchesConnectedHeadset(BluetoothDevice device, AudioDeviceInfo route) {
+        try {
+            return device != null && profile != null && device.equals(match(profile.getConnectedDevices(), route));
+        } catch (SecurityException | IllegalStateException unavailable) {
+            return false;
+        }
+    }
+
+    boolean audioConnected(AudioDeviceInfo route) {
+        if (profile == null) return false;
+        try {
+            BluetoothDevice device = match(profile.getConnectedDevices(), route);
+            return device != null && profile.isAudioConnected(device);
+        } catch (SecurityException revoked) {
+            return false;
+        }
+    }
+
     State evaluate(AudioDeviceInfo route) {
         if (profile == null) return binding && SystemClock.elapsedRealtime() < profileDeadline
             ? State.CONNECTING : State.UNAVAILABLE;

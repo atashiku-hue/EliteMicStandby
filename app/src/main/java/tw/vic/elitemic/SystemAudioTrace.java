@@ -31,6 +31,49 @@ final class SystemAudioTrace {
         InputComparison.migrate(prefs);
     }
 
+    // Only the latest explicit preparation is retained. Recording callbacks are device-wide.
+    private boolean trackingPreparation;
+    private int phrases;
+    private final java.util.ArrayDeque<String> recentPhrases = new java.util.ArrayDeque<>();
+    private String firstInput, latestInput;
+    void beginPreparation(String trigger) {
+        trackingPreparation = true;
+        phrases = 0;
+        recentPhrases.clear();
+        firstInput = latestInput = null;
+        prefs.edit().putString("prepTrigger",trigger).putString("prepStart",time()).remove("prepReady").remove("prepFirst")
+                .remove("prepLatest").remove("prepPhrases").remove("prepEnd").apply();
+    }
+    private static String time() {
+        return new java.text.SimpleDateFormat("HH:mm:ss.SSS",java.util.Locale.ROOT).format(new java.util.Date());
+    }
+    void confirmPreparation() {
+        if (trackingPreparation) prefs.edit().putString("prepReady",time()).apply();
+    }
+    void finishPreparation(String reason) {
+        if (!trackingPreparation) return;
+        trackingPreparation = false;
+        prefs.edit().putString("prepEnd",time()+(phrases==0 ? " 準備結束，沒有觀察到錄音" : " 本次聽寫準備結束")+"（"+reason+"）").apply();
+    }
+    private void observePreparedRecording() {
+        if (!trackingPreparation) return;
+        if (visible && !recording.equals(latestInput)) {
+            String observation = time()+" "+recording;
+            SharedPreferences.Editor edit = prefs.edit().putString("prepLatest",observation);
+            if (firstInput == null) { firstInput = recording; edit.putString("prepFirst",observation); }
+            if (latestInput == null) {
+                phrases++;
+                if (recentPhrases.size() >= 5) recentPhrases.removeFirst();
+                recentPhrases.addLast("第 "+phrases+" 段　"+observation);
+                edit.putString("prepPhrases",String.join("\n",recentPhrases));
+            }
+            latestInput = recording;
+            edit.apply();
+        } else if (!visible && latestInput != null) {
+            latestInput = null;
+            prefs.edit().putString("prepEnd",time()+" 可見錄音結束").apply();
+        }
+    }
     void recordingChanged(List<AudioRecordingConfiguration> configs) {
         List<String> descriptions = new ArrayList<>();
         for (AudioRecordingConfiguration config : configs) {
@@ -48,6 +91,7 @@ final class SystemAudioTrace {
         Collections.sort(descriptions);
         visible = !descriptions.isEmpty();
         recording = visible ? String.join("、", descriptions) : "沒有可見錄音";
+        observePreparedRecording();
         sample();
     }
 
@@ -101,7 +145,12 @@ final class SystemAudioTrace {
     }
     static String report(SharedPreferences prefs) {
         return "耳機聽寫待命 " + BuildConfig.VERSION_NAME + " · Android " + Build.VERSION.RELEASE + "（API " + Build.VERSION.SDK_INT + "） · "
-                + Build.MODEL + "\nHFP 為傳統藍牙通話、A2DP 為媒體，均為手機整體狀態。錄音歸屬與音量未知。\n\n最近一次可見錄音\n"
+                + Build.MODEL + "\nHFP 為傳統藍牙通話、A2DP 為媒體，均為手機整體狀態。錄音歸屬與音量未知。\n\n最近一次準備與錄音（全機，排除本工具量測）\n"
+                + prefs.getString("prepTrigger","按準備")+"："+prefs.getString("prepStart","無")+"｜藍牙輸入與通訊路由確認："+prefs.getString("prepReady","未確認")
+                +"\n首個錄音輸入："+prefs.getString("prepFirst","尚未觀察到")
+                +"\n各段開始時的輸入（最多五段）：\n"+prefs.getString("prepPhrases","尚未觀察到")
+                +"\n最近錄音輸入："+prefs.getString("prepLatest","尚未觀察到")+"\n"+prefs.getString("prepEnd","")
+                +"\n\n最近一次可見錄音\n"
                 + prefs.getString(LAST_RECORDING,"尚未觀察到") + "\n\n" + InputComparison.report(prefs) + "\n\n系統變化（新到舊）\n"
                 + prefs.getString(HISTORY,"尚未觀察到");
     }

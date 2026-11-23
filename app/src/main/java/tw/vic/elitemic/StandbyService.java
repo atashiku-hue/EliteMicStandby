@@ -23,8 +23,114 @@ public class StandbyService extends Service {
     private TelecomManager telecom;
     private boolean requested, listening, receiverOn, devicesOn, modeOn, routeOn, recordingsOn;
     private int requestedId=-1;
-    // Process-local flag for the optional hardware shortcut; never restore stale route state.
-    static volatile boolean readyForShortcut;
+    static final String PREPARE = "prepareOnce";
+    private static final long PREPARE_MS = 20000;
+    private static final long BETWEEN_PHRASES_MS = 12000;
+    private int preparedDevice = -1;
+    private boolean preparationConfirmed, preparedRecording, betweenPhrases;
+    private BluetoothDevice automaticHeadset;
+    private final Runnable expirePreparation = () -> {
+        cancelPreparation(betweenPhrases ? "句間等待結束" : preparationConfirmed ? "就緒後等待首句逾時" : "等待藍牙就緒逾時");
+        queue();
+    };
+
+    private void cancelPreparation(String reason) {
+        clearPreparation();
+        if (trace != null) trace.finishPreparation(reason);
+    }
+    private void clearPreparation() {
+        main.removeCallbacks(expirePreparation);
+        preparedDevice = -1;
+        automaticHeadset = null;
+        preparedRecording = betweenPhrases = false;
+        preparationConfirmed = false;
+    }
+    private BluetoothDevice connectedHeadset;
+    private long reconnectDeadline;
+
+    // Consume a connection edge once. Android can publish its audio ports later.
+    private void checkReconnect(boolean call) {
+        if (reconnectDeadline == 0) return;
+        if (SystemClock.elapsedRealtime() >= reconnectDeadline || call || hasExternalMicrophone()
+                || playingMedia() || visibleRecording() || preparedDevice >= 0 || Prefs.keepVoiceReady(this)) {
+            reconnectDeadline = 0;
+            return;
+        }
+        AudioDeviceInfo port = target(audio.getCommunicationDevice());
+        if (port == null || port.getType() != AudioDeviceInfo.TYPE_BLUETOOTH_SCO
+                || !voice.matchesConnectedHeadset(connectedHeadset, port)) {
+            later(350);
+            return;
+        }
+        reconnectDeadline = 0;
+        beginPreparation(port, "藍牙重連自動準備");
+        automaticHeadset = connectedHeadset;
+    }
+
+    boolean prepareOnce() {
+        if (!listening || callBusy() || hasExternalMicrophone() || playingMedia() || visibleRecording()) return false;
+        AudioDeviceInfo target = target(audio.getCommunicationDevice());
+        if (target == null) return false;
+        reconnectDeadline = 0;
+        beginPreparation(target, "按準備");
+        return true;
+    }
+    private void beginPreparation(AudioDeviceInfo target, String trigger) {
+        automaticHeadset = null;
+        if (preparedDevice != target.getId()) cancelPreparation("新的準備取代前一次");
+        preparedDevice = target.getId();
+        lastRecordingSeen = -1;
+        preparedRecording = betweenPhrases = false;
+        preparationConfirmed = false;
+        trace.beginPreparation(trigger);
+        main.removeCallbacks(expirePreparation);
+        main.postDelayed(expirePreparation, PREPARE_MS);
+        report("正在為本次聽寫連接耳麥，請等就緒提示");
+        queue();
+    }
+    private boolean hasMatchingInput(AudioDeviceInfo target) {
+        String wanted = target.getAddress();
+        int candidates = 0;
+        boolean addressHidden = false;
+        for (AudioDeviceInfo input : audio.getDevices(AudioManager.GET_DEVICES_INPUTS)) {
+            if (input.getType() != target.getType()) continue;
+            candidates++;
+            String actual = input.getAddress();
+            if (knownAddress(wanted) && knownAddress(actual) && wanted.equalsIgnoreCase(actual)) return true;
+            if (!knownAddress(wanted) || !knownAddress(actual)) addressHidden = true;
+        }
+        if (candidates != 1 || !addressHidden) return false;
+        int outputs = 0;
+        for (AudioDeviceInfo port : audio.getAvailableCommunicationDevices())
+            if (port.getType() == target.getType()) outputs++;
+        return outputs == 1;
+    }
+    private static boolean knownAddress(String address) {
+        return address != null && !address.isEmpty() && !"02:00:00:00:00:00".equals(address)
+                && !"00:00:00:00:00:00".equals(address);
+    }
+    private void prepared(AudioDeviceInfo target) {
+        if (preparedDevice != target.getId()) return;
+        if (target.getType() == AudioDeviceInfo.TYPE_BLUETOOTH_SCO && !voice.audioConnected(target)) {
+            report("等待耳機實際接通語音通道");
+            later(350);
+            return;
+        }
+        if (!hasMatchingInput(target)) {
+            report("通話聲道已連上，等待 Android 列出相符的藍牙麥克風");
+            later(350);
+            return;
+        }
+        if (!preparationConfirmed) {
+            preparationConfirmed = true;
+            trace.confirmPreparation();
+            main.removeCallbacks(expirePreparation);
+            main.postDelayed(expirePreparation, PREPARE_MS);
+        }
+        if (betweenPhrases) report("可直接點浮球繼續聽寫，停頓 12 秒後恢復一般耳機模式");
+        else if (preparedRecording) report("本次準備中已觀察到錄音，實際來源可查系統收音紀錄");
+        else report("藍牙輸入已列出，可以點浮球；實際錄音來源待確認");
+    }
     private String lastStatus="";
     private boolean multipleHeadsets;
     private final Runnable evaluate=this::evaluate;
@@ -35,8 +141,32 @@ public class StandbyService extends Service {
     private void later(long delay){main.removeCallbacks(checkLater);main.postDelayed(checkLater,delay);}
     private final BroadcastReceiver events=new BroadcastReceiver(){
         @Override public void onReceive(Context ctx,Intent event){
+            String action = event.getAction();
+            int radioState = event.getIntExtra(BluetoothAdapter.EXTRA_STATE,-1);
+            if (BluetoothAdapter.ACTION_STATE_CHANGED.equals(action)
+                    && (radioState == BluetoothAdapter.STATE_OFF || radioState == BluetoothAdapter.STATE_TURNING_OFF)) {
+                connectedHeadset = null;
+                reconnectDeadline = 0;
+                cancelPreparation("手機藍牙正在關閉");
+            }
+            if (BluetoothHeadset.ACTION_CONNECTION_STATE_CHANGED.equals(action)) {
+                BluetoothDevice device = event.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
+                int state = event.getIntExtra(BluetoothProfile.EXTRA_STATE,-1);
+                if (device != null && state == BluetoothProfile.STATE_CONNECTED && !device.equals(connectedHeadset)) {
+                    connectedHeadset = device;
+                    reconnectDeadline = SystemClock.elapsedRealtime() + PREPARE_MS;
+                } else if (state == BluetoothProfile.STATE_DISCONNECTED && (device == null || device.equals(connectedHeadset))) {
+                    connectedHeadset = null;
+                    reconnectDeadline = 0;
+                }
+            }
             if (BluetoothAdapter.ACTION_STATE_CHANGED.equals(event.getAction()) && voice != null
                     && event.getIntExtra(BluetoothAdapter.EXTRA_STATE, -1) == BluetoothAdapter.STATE_ON) bindVoice();
+            if (BluetoothHeadset.ACTION_CONNECTION_STATE_CHANGED.equals(event.getAction()) &&
+                    event.getIntExtra(BluetoothProfile.EXTRA_STATE,-1) == BluetoothProfile.STATE_DISCONNECTED
+                    && (automaticHeadset == null || event.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE) == null
+                            || automaticHeadset.equals(event.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE))))
+                cancelPreparation("耳機通話連線中斷");
             if (BluetoothHeadset.ACTION_CONNECTION_STATE_CHANGED.equals(event.getAction()) && voice != null
                     && event.getIntExtra(BluetoothProfile.EXTRA_STATE, -1) == BluetoothProfile.STATE_DISCONNECTED
                     && voice.disconnected(event.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE))) {
@@ -53,11 +183,90 @@ public class StandbyService extends Service {
         @Override public void onAudioDevicesAdded(AudioDeviceInfo[] d){queue();}
         @Override public void onAudioDevicesRemoved(AudioDeviceInfo[] d){queue();}
     };
+    // Playback callbacks also fire for the silent voice standby track. Only media
+    // and games should displace dictation. Do not request audio focus or inspect player identities.
+    private boolean playbackRegistered, yieldingToMedia;
+    private long mediaQuietSince = -1;
+    private static final long MEDIA_RESUME_DELAY_MS = 2500;
+    private final AudioManager.AudioPlaybackCallback mediaChanges = new AudioManager.AudioPlaybackCallback() {
+        @Override public void onPlaybackConfigChanged(List<AudioPlaybackConfiguration> configs) { queue(); }
+    };
+    private boolean playingMedia() {
+        if (audio.isMusicActive()) return true;
+        for (AudioPlaybackConfiguration player : audio.getActivePlaybackConfigurations()) {
+            int usage = player.getAudioAttributes().getUsage();
+            if (usage == AudioAttributes.USAGE_MEDIA || usage == AudioAttributes.USAGE_GAME) return true;
+        }
+        return false;
+    }
+    private boolean shouldYieldToMedia() {
+        if (playingMedia()) {
+            yieldingToMedia = true;
+            mediaQuietSince = -1;
+            later(2000);
+            return true;
+        }
+        if (!yieldingToMedia) return false;
+        long now = SystemClock.elapsedRealtime();
+        if (mediaQuietSince < 0) mediaQuietSince = now;
+        long remaining = MEDIA_RESUME_DELAY_MS - (now - mediaQuietSince);
+        if (remaining > 0) {
+            later(remaining);
+            return true;
+        }
+        yieldingToMedia = false;
+        mediaQuietSince = -1;
+        return false;
+    }
+    private long lastRecordingSeen = -1;
+    private static final long RECORDING_TAIL_MS = 1500;
+    boolean visibleRecording() { return !audio.getActiveRecordingConfigurations().isEmpty(); }
+
+    private boolean nativeIdle() {
+        if (preparedDevice >= 0) {
+            boolean recording = visibleRecording();
+            if (!preparationConfirmed && recording) {
+                // Recording beat readiness.
+                cancelPreparation("錄音早於藍牙就緒");
+            } else {
+                if (recording != preparedRecording) {
+                    preparedRecording = recording;
+                    betweenPhrases = !recording;
+                    main.removeCallbacks(expirePreparation);
+                    if (betweenPhrases) main.postDelayed(expirePreparation, BETWEEN_PHRASES_MS);
+                }
+                return false;
+            }
+        }
+        if (Prefs.keepVoiceReady(this)) {
+            lastRecordingSeen = -1;
+            return false;
+        }
+        long now = SystemClock.elapsedRealtime();
+        if (visibleRecording()) {
+            lastRecordingSeen = now;
+            return false;
+        }
+        if (lastRecordingSeen >= 0) {
+            long remaining = RECORDING_TAIL_MS - (now - lastRecordingSeen);
+            if (remaining > 0) {
+                main.removeCallbacks(afterRecording);
+                main.postDelayed(afterRecording, remaining);
+                return false;
+            }
+            lastRecordingSeen = -1;
+        }
+        return true;
+    }
+    private final Runnable afterRecording = this::queue;
     private final AudioManager.OnModeChangedListener modes=m->queue();
     private final AudioManager.OnCommunicationDeviceChangedListener routes=d->queue();
     private final AudioManager.AudioRecordingCallback recordings=new AudioManager.AudioRecordingCallback(){
         @Override public void onRecordingConfigChanged(List<AudioRecordingConfiguration> configs){
-            if(listening) trace.recordingChanged(configs);
+            if(listening) {
+                trace.recordingChanged(configs);
+                if (!Prefs.keepVoiceReady(StandbyService.this)) queue();
+            }
         }
     };
     @Override public void onCreate(){
@@ -75,6 +284,8 @@ public class StandbyService extends Service {
         return new Notification.Builder(this,CHANNEL).setSmallIcon(R.drawable.headset)
             .setContentTitle("耳機聽寫待命").setContentText(status).setStyle(new Notification.BigTextStyle().bigText(status))
             .setContentIntent(open).setOnlyAlertOnce(true).setOngoing(true)
+            .addAction(new Notification.Action.Builder(null,"準備本次聽寫",PendingIntent.getService(this,3,
+                new Intent(this,StandbyService.class).setAction(PREPARE),PendingIntent.FLAG_IMMUTABLE)).build())
             .addAction(new Notification.Action.Builder(null,"停止",stop).build()).build();
     }
     private void report(String s){
@@ -90,6 +301,8 @@ public class StandbyService extends Service {
         try{
             startForeground(1,notification(lastStatus.isEmpty()?"啟動中":lastStatus));
             if(!listening) registerEvents();
+            if(intent!=null && PREPARE.equals(intent.getAction()) && !prepareOnce())
+                android.widget.Toast.makeText(this,"請先暫停媒體、結束錄音並連上藍牙耳機",android.widget.Toast.LENGTH_SHORT).show();
             queue();return START_STICKY;
         }catch(RuntimeException e){
             stopWithError(e);return START_NOT_STICKY;
@@ -106,6 +319,7 @@ public class StandbyService extends Service {
         BluetoothManager bluetooth=getSystemService(BluetoothManager.class);
         voice=new HeadsetVoiceSession(bluetooth==null ? null : bluetooth.getAdapter(), this::queue, directVoiceSupported());
         bindVoice();
+        audio.registerAudioPlaybackCallback(mediaChanges,main);playbackRegistered=true;
         audio.registerAudioDeviceCallback(devices,main);devicesOn=true;
         audio.addOnModeChangedListener(getMainExecutor(),modes);modeOn=true;
         audio.addOnCommunicationDeviceChangedListener(getMainExecutor(),routes);routeOn=true;
@@ -146,11 +360,51 @@ public class StandbyService extends Service {
         try{
             trace.sample();
             boolean call=callBusy();
+            checkReconnect(call);
+            if (preparedDevice >= 0) {
+                AudioDeviceInfo candidate = target(audio.getCommunicationDevice());
+                if (call) cancelPreparation("通話或通訊模式優先");
+                else if (hasExternalMicrophone()) cancelPreparation("USB 或有線麥克風優先");
+                else if (playingMedia()) cancelPreparation("系統仍偵測到媒體播放");
+                else if (candidate == null || candidate.getId() != preparedDevice) {
+                    // During HFP negotiation the same headset may disappear or return under another audio port.
+                    // Keep the original preparation deadline. Explicit disconnection still cancels immediately.
+                    if (automaticHeadset != null && !preparationConfirmed && !visibleRecording()) {
+                        if (candidate == null) {
+                            if (requested) release();
+                            policy.reset();
+                            report("重連中，等待 Android 重新列出耳機通訊裝置");
+                            later(350);
+                            return;
+                        }
+                        if (candidate.getType() == AudioDeviceInfo.TYPE_BLUETOOTH_SCO
+                                && voice.matchesConnectedHeadset(automaticHeadset,candidate)) {
+                            release();
+                            policy.reset();
+                            preparedDevice = candidate.getId();
+                        } else cancelPreparation("通訊裝置已更換或無法確認同一副耳機");
+                    } else cancelPreparation("通訊裝置消失或已更換");
+                }
+            }
             if (!call && hasExternalMicrophone()) {
                 release();
                 voice.reset();
                 policy.reset();
                 report("USB 或有線麥克風優先，已讓出藍牙路由");
+                return;
+            }
+            if (!call && nativeIdle()) {
+                release();
+                voice.reset();
+                policy.reset();
+                report("日常模式：已讓出語音通道，可使用原生通透與媒體；等待系統出現錄音");
+                return;
+            }
+            if (!call && shouldYieldToMedia()) {
+                release();
+                voice.reset();
+                policy.reset();
+                report("媒體播放優先，已讓出耳機語音通道；播放暫停後恢復聽寫待命");
                 return;
             }
             AudioDeviceInfo current=audio.getCommunicationDevice();
@@ -163,24 +417,24 @@ public class StandbyService extends Service {
                 catch (RuntimeException unavailable) { voice.reset(); state = HeadsetVoiceSession.State.UNAVAILABLE; }
                 switch (state) {
                     case BUSY:
-                        readyForShortcut = false;
                         report("其他耳機正在使用語音通道，已讓路");
                         return;
                     case CONNECTING:
-                        readyForShortcut = false;
                         report("等待藍牙耳機確認語音通道");
                         later(750);
                         return;
                     case CONNECTED:
                     case EXTERNAL:
                         if (target == null) {
-                            readyForShortcut = false;
                             report("耳機語音已連線，等待 Android 提供耳機通訊裝置");
                             return; // Device and route callbacks will re-evaluate.
                         }
-                        if (current != null && current.getId() == target.getId()) {
-                            readyForShortcut = true;
-                            report("耳機語音已連線，Android 通訊裝置已選耳機 · Typeless 收音待確認");
+                        // A system-selected SCO output need not belong to this service.
+                        // Pin the route explicitly for a prepared dictation, even if it already looks selected.
+                        if (current != null && current.getId() == target.getId()
+                                && (preparedDevice < 0 || (requested && requestedId == target.getId()))) {
+                            if (preparedDevice >= 0) prepared(target);
+                            else report("耳機語音已連線，Android 通訊裝置已選耳機 · Typeless 收音待確認");
                             return;
                         }
                         // A connected HFP link does not select the Android communication device.
@@ -198,11 +452,11 @@ public class StandbyService extends Service {
             case RELEASE_ABSENT:
                 release();report(multipleHeadsets?"有多個藍牙通訊裝置，等待系統指定使用中的耳機":"等待藍牙耳機通訊連線，連上即自動啟用");break;
             case ALREADY_ROUTED:
-                readyForShortcut=true;
+                if (preparedDevice >= 0) { prepared(target); break; }
                 report("系統通訊路由（備用）："+target.getProductName()+"（藍牙） · "+
                     playbackStatus(target));
                 break;
-            case WAIT:readyForShortcut=false;break;
+            case WAIT:break;
             case FAILED:
                 release();report("系統未確認耳機路由；已停止嘗試。重新連線或停止後再啟用。");break;
             case START:
@@ -211,7 +465,11 @@ public class StandbyService extends Service {
                     try { openStandbyTrack(target); }
                     catch (IllegalStateException | IllegalArgumentException unavailable) { closeStandbyTrack(); }
                     requested=audio.setCommunicationDevice(target);
-                    if(requested){requestedId=id;report("等候 Android 確認耳機路由");}
+                    if(requested){
+                        requestedId=id;
+                        report("等候 Android 確認耳機路由");
+                        if (preparedDevice >= 0) queue();
+                    }
                     else {release();report("Android 拒絕路由，等候重試");}
                 }catch(IllegalArgumentException | IllegalStateException e){
                     release();report("路由暫時無法使用："+e.getClass().getSimpleName());
@@ -268,7 +526,6 @@ public class StandbyService extends Service {
     }
 
     private void release(){
-        readyForShortcut=false;
         if(requested){try{audio.clearCommunicationDevice();}catch(RuntimeException ignored){}}
         requested=false;requestedId=-1;
         closeStandbyTrack();
@@ -282,8 +539,10 @@ public class StandbyService extends Service {
         }
     }
     @Override public void onDestroy(){
+        cancelPreparation("待命服務已停止");
         listening=false;main.removeCallbacksAndMessages(null);
         if(receiverOn) unregisterReceiver(events);
+        if(playbackRegistered) audio.unregisterAudioPlaybackCallback(mediaChanges);
         if(devicesOn) audio.unregisterAudioDeviceCallback(devices);
         if(modeOn) audio.removeOnModeChangedListener(modes);
         if(routeOn) audio.removeOnCommunicationDeviceChangedListener(routes);
