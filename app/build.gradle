@@ -1,0 +1,32 @@
+plugins { id 'com.android.application' version '8.7.3' }
+android {
+    namespace 'tw.vic.elitemic'
+    buildFeatures { buildConfig true }
+    compileSdk 34
+    sourceSets.main.java {
+        srcDir '../checks/default-input/src/main/java'
+        exclude 'tw/vic/defaultinput/CaptureActivity.java'
+    }
+    defaultConfig {
+        applicationId 'tw.vic.elitemic'
+        minSdk 31
+        targetSdk 34
+        versionCode 10
+        versionName '0.5.2'
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+android {
+    testOptions.unitTests.includeAndroidResources = true
+    testOptions.unitTests.all {
+        systemProperty 'robolectric.dependency.repo.url', 'https://repo.maven.apache.org/maven2'
+    }
+}
+dependencies {
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.robolectric:robolectric:4.14.1'
+}
